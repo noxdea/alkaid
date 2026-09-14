@@ -1,0 +1,69 @@
+# Alkaid
+
+Alkaid is a pure Ruby file walker and parallel content search library. It
+streams deterministic, byte-accurate matches without depending on an editor,
+Git implementation, or fuzzy matcher.
+
+## Installation
+
+```ruby
+gem "alkaid"
+```
+
+## Usage
+
+```ruby
+require "alkaid"
+
+search = Alkaid::Search.new(
+  Dir.pwd,
+  pattern: "TODO",
+  include: ["**/*.rb"],
+  workers: 4
+)
+
+search.run do |match|
+  puts "#{match.path}:#{match.line_number}:#{match.byte_offset}"
+end
+```
+
+`byte_offset` is the match's zero-based offset in the file. `ranges` contains
+zero-based byte ranges in `line`, which retains its original line ending.
+Results are ordered by relative path and byte offset even when worker processes
+are enabled.
+
+Pass any ignore object that implements `ignored?(path, directory:)`. Alkaid
+does not parse ignore files and does not depend on a Git library:
+
+```ruby
+ignore = MyIgnoreMatcher.new
+files = Alkaid::Walker.new(Dir.pwd, ignore: ignore).to_a
+search = Alkaid::Search.new(Dir.pwd, pattern: /error/i, ignore: ignore)
+```
+
+Literal and regular-expression searches support case folding, whole-word
+matching, include/exclude globs, file-size limits, result limits, cancellation,
+and optional symlink or hidden-file traversal. Binary and invalid UTF-8 files
+are skipped.
+
+```ruby
+search.cancel
+progress = search.progress
+```
+
+## Development
+
+```sh
+bundle install
+bundle exec rake test
+bundle exec rbs -I sig validate
+BUDGET=1 bundle exec rake bench
+gem build --strict alkaid.gemspec
+```
+
+Use `FILES=100000 BYTES=10000 bundle exec rake bench` to exercise the full
+100,000-file, approximately 1 GB design workload.
+
+## License
+
+Alkaid is available under the MIT License.

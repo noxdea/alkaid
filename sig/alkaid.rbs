@@ -1,0 +1,51 @@
+module Alkaid
+  VERSION: String
+
+  interface _IgnoreMatcher
+    def ignored?: (String path, ?directory: bool) -> bool
+  end
+
+  class Error < StandardError
+  end
+
+  class Match
+    attr_reader path: String
+    attr_reader line_number: Integer
+    attr_reader byte_offset: Integer
+    attr_reader line: String
+    attr_reader ranges: Array[::Range[Integer]]
+    def self.new: (String path, Integer line_number, Integer byte_offset, String line, Array[::Range[Integer]] ranges) -> Match
+                | (path: String, line_number: Integer, byte_offset: Integer, line: String, ranges: Array[::Range[Integer]]) -> Match
+    def with: (?path: String, ?line_number: Integer, ?byte_offset: Integer, ?line: String, ?ranges: Array[::Range[Integer]]) -> Match
+  end
+
+  class Progress
+    attr_reader files_scanned: Integer
+    attr_reader bytes_scanned: Integer
+    attr_reader matches: Integer
+    def self.new: (Integer files_scanned, Integer bytes_scanned, Integer matches) -> Progress
+                | (files_scanned: Integer, bytes_scanned: Integer, matches: Integer) -> Progress
+    def with: (?files_scanned: Integer, ?bytes_scanned: Integer, ?matches: Integer) -> Progress
+  end
+
+  class Walker
+    include Enumerable[String]
+    attr_reader root: String
+    def initialize: (String root, ?ignore: _IgnoreMatcher?, ?follow_symlinks: bool, ?hidden: bool, ?max_depth: Integer?) -> void
+    def each: () -> Enumerator[String, self]
+            | () { (String) -> untyped } -> self
+  end
+
+  class Search
+    DEFAULT_MAX_FILE_SIZE: Integer
+    def initialize: (String root, pattern: String | Regexp, ?regexp: bool, ?ignore_case: bool,
+      ?whole_word: bool, ?include: Array[String], ?exclude: Array[String], ?ignore: _IgnoreMatcher?,
+      ?workers: Integer, ?max_file_size: Integer?, ?max_matches: Integer?, ?follow_symlinks: bool,
+      ?hidden: bool, ?max_depth: Integer?, ?extensions: Array[String]?, ?paths: Array[String]?,
+      ?cancelled: ^() -> bool) -> void
+    def run: () -> Array[Match]
+           | () { (Match) -> untyped } -> Array[Match]
+    def cancel: () -> nil
+    def progress: () -> Progress
+  end
+end
