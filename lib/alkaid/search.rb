@@ -111,13 +111,15 @@ module Alkaid
     def cancelled? = @cancelled || @external_cancelled&.call
 
     def search_paths
-      files = (@paths || @walker.each).to_a.dup
-      files.each do |relative|
+      files = []
+      (@paths || @walker.each).each do |relative|
         SearchWorker.check_cancelled(method(:cancelled?))
         validate_path(relative)
+        next if @extensions && !@paths && !@extensions.include?(File.extname(relative))
+        next unless selected?(relative)
+
+        files << relative
       end
-      files.select! { |path| @extensions.include?(File.extname(path)) } if @extensions && !@paths
-      files.select! { |path| selected?(path) }
       files.sort!.uniq!
       files
     end

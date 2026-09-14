@@ -123,6 +123,19 @@ class SearchTest < Minitest::Test
     end
   end
 
+  def test_external_cancellation_interrupts_path_collection
+    with_tree do |root|
+      write(root, "one", "x")
+      calls = 0
+      paths = Array.new(1_000) { |index| "missing-#{index}" }
+      search = Alkaid::Search.new(root, pattern: "x", workers: 1, paths: paths,
+        cancelled: -> { (calls += 1) >= 5 })
+      assert_empty search.run
+      assert_equal 5, calls
+      assert_equal 0, search.progress.files_scanned
+    end
+  end
+
   def test_callback_failure_still_reaps_workers
     with_tree do |root|
       %w[a b].each { |path| write(root, path, "x\n") }
