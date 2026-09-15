@@ -1,11 +1,16 @@
 name: Ruby
 on: [push, pull_request]
 
+concurrency:
+  group: ruby-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
 jobs:
   build:
+    name: Ruby ${{ matrix.ruby }} on ${{ matrix.os }}
     env:
       BUNDLE_VERSION: system
     runs-on: ${{ matrix.os }}
@@ -27,6 +32,7 @@ jobs:
       - run: bundle exec rbs -I sig validate
       - run: gem build --strict alkaid.gemspec
   bench:
+    name: Performance budget
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
