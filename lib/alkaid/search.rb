@@ -17,7 +17,7 @@ module Alkaid
       @root = File.realpath(root)
       raise ArgumentError, "root must be a directory" unless File.directory?(@root)
 
-      @expression = expression(pattern, regexp, ignore_case, whole_word)
+      @expression, @timeout = expression(pattern, regexp, ignore_case, whole_word)
       @include = include.map(&:dup).map(&:freeze).freeze
       @exclude = exclude.map(&:dup).map(&:freeze).freeze
       @workers = workers
@@ -96,7 +96,8 @@ module Alkaid
       options = pattern.is_a?(Regexp) ? pattern.options : 0
       options |= Regexp::IGNORECASE if ignore_case
       timeout = pattern.respond_to?(:timeout) ? pattern.timeout : nil
-      Regexp.new(source, options, timeout: timeout || 0.25)
+      timeout ||= 0.25
+      [Regexp.new(source, options, timeout: timeout), timeout]
     end
 
     def begin_run
@@ -193,7 +194,7 @@ module Alkaid
     end
 
     def parallel(files, count)
-      SearchPool.new(@root, @expression, @max_file_size, @max_matches, method(:cancelled?)).run(files, count) do |message|
+      SearchPool.new(@root, @expression, @timeout, @max_file_size, @max_matches, method(:cancelled?)).run(files, count) do |message|
         yield message
       end
     end

@@ -249,8 +249,11 @@ class SearchTest < Minitest::Test
     unbounded = Regexp.new("x", timeout: Float::INFINITY)
     with_tree do |root|
       %w[a b].each { |path| write(root, path, "x") }
-      assert_equal 2, Alkaid::Search.new(root, pattern: unbounded, workers: 1).run.length
-      assert_equal 2, Alkaid::Search.new(root, pattern: unbounded, workers: 2).run.length
+      serial = Alkaid::Search.new(root, pattern: unbounded, workers: 1)
+      parallel = Alkaid::Search.new(root, pattern: unbounded, workers: 2)
+      assert_operator parallel.instance_variable_get(:@timeout), :>, 0
+      assert_equal 2, serial.run.length
+      assert_equal 2, parallel.run.length
     end
 
     value = [:line, "日本.rb", 1, 0, "file text\n"]

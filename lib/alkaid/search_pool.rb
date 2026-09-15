@@ -9,9 +9,10 @@ module Alkaid
     Child = Struct.new(:pid, :input, :output, :queue, :writer, :reader, :waiter)
     private_constant :Child
 
-    def initialize(root, expression, max_size, limit, cancelled)
+    def initialize(root, expression, timeout, max_size, limit, cancelled)
       @root = root
       @expression = expression
+      @timeout = timeout
       @max_size = max_size
       @limit = limit
       @cancelled = cancelled
@@ -70,7 +71,7 @@ module Alkaid
       child_input, input = IO.pipe
       output, child_output = IO.pipe
       child = Child.new(nil, input, output, SizedQueue.new(2))
-      config = [@root, files, @expression.source, @expression.options, @max_size, @limit, @expression.timeout]
+      config = [@root, files, @expression.source, @expression.options, @max_size, @limit, @timeout]
       child.pid = Process.spawn({"RUBYOPT" => nil, "RUBYLIB" => nil}, RbConfig.ruby, "--disable-gems",
         File.expand_path("search_worker/runner.rb", __dir__), in: child_input, out: child_output, err: File::NULL)
       child.waiter = Process.detach(child.pid)
