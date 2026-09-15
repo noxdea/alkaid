@@ -121,6 +121,19 @@ class SearchTest < Minitest::Test
     end
   end
 
+  def test_parallel_multiline_results_stay_ordered_across_batches
+    with_tree do |root|
+      paths = Array.new(520) { |index| format("%04d", index) }
+      paths.each { |path| write(root, path, "foo\nbar\n") }
+      matches = Alkaid::Search.new(root, pattern: /foo\nbar/, workers: 4).run
+
+      assert_equal paths, matches.map(&:path)
+      assert matches.all? { |match| match.line_number == 1 && match.byte_offset == 0 && match.ranges == [0...7] }
+      limited = Alkaid::Search.new(root, pattern: /foo\nbar/, workers: 4, max_matches: 257).run
+      assert_equal paths.first(257), limited.map(&:path)
+    end
+  end
+
   def test_cancel_stops_children_discards_return_value_and_reaps_processes
     with_tree do |root|
       %w[a b c d].each { |path| write(root, path, "x" * 500_000) }
@@ -185,6 +198,30 @@ class SearchTest < Minitest::Test
         end
         assert_equal "stop", error.message
       end
+    end
+  end
+
+  def test_parallel_progress_is_collected_while_the_first_partition_is_busy
+    with_tree do |root|
+      write(root, "000-slow", "a" * 20_000 + "!")
+      1_199.times { |index| write(root, format("%04d-fast", index + 1), "b") }
+      expression = Regexp.new('^(a+)+\\1$', timeout: 1)
+      search = Alkaid::Search.new(root, pattern: expression, workers: 4)
+      failure = nil
+      thread = Thread.new do
+        search.run
+      rescue IOError => error
+        failure = error
+      end
+
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 0.8
+      sleep(0.01) while thread.alive? && search.progress.files_scanned < 512 &&
+        Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
+      observed = search.progress.files_scanned
+      joined = thread.join(2)
+      assert_operator observed, :>=, 512
+      assert joined, "parallel search did not stop after the worker timeout"
+      assert_match(/Regexp::TimeoutError/, failure&.message)
     end
   end
 
@@ -268,17 +305,19 @@ class SearchTest < Minitest::Test
       assert_raises(IOError) { Worker.read_frame(StringIO.new([size].pack("N"))) }
     end
     assert_raises(IOError) { Worker.read_frame(StringIO.new([3].pack("N") + "bad")) }
-    [nil, [:line, "a", 0, -1, "x"], [:matches, [[1, 0, 2], :bad]], [:progress, -1, 0], [:error, 1], [:unknown]].each do |message|
+    [nil, [:line, "a", 0, -1, "x"], [:matches, [[1, 0, 2], :bad]], [:progress, -1, 0],
+     [:batch, 1], [:error, 1], [:unknown]].each do |message|
       assert_raises(IOError) { Worker.validate_message(message) }
     end
   end
 
   def test_worker_configuration_and_match_ranges_are_validated
     with_tree do |root|
-      valid = [root, ["a"], "x", 0, 1, nil, 0.25]
+      valid = [root, ["a"], "x", 0, 1, nil, 0.25, [1]]
       assert_same valid, Worker.validate_config(valid)
       [valid[0...-1], valid.dup.tap { |entry| entry[1] = ["../outside"] },
-       valid.dup.tap { |entry| entry[4] = Worker::MAX_FILE_BYTES + 1 }].each do |config|
+       valid.dup.tap { |entry| entry[4] = Worker::MAX_FILE_BYTES + 1 },
+       valid.dup.tap { |entry| entry[7] = [2] }].each do |config|
         assert_raises(IOError) { Worker.validate_config(config) }
       end
 

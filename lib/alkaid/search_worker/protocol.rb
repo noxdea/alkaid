@@ -29,11 +29,11 @@ module Alkaid::SearchWorker
   end
 
   def validate_config(value)
-    unless value.is_a?(Array) && value.length == 7
+    unless value.is_a?(Array) && value.length == 8
       raise IOError, "invalid search worker configuration"
     end
 
-    root, paths, source, options, max_size, limit, timeout = value
+    root, paths, source, options, max_size, limit, timeout, batch_sizes = value
     valid_root = root.is_a?(String) && root.valid_encoding? && !root.include?("\0") && File.directory?(root)
     valid_paths = paths.is_a?(Array) && paths.all? { |path| valid_path?(path) }
     valid_source = source.is_a?(String) && source.valid_encoding?
@@ -41,7 +41,10 @@ module Alkaid::SearchWorker
     valid_size = max_size.is_a?(Integer) && max_size.between?(0, MAX_FILE_BYTES)
     valid_limit = limit.nil? || (limit.is_a?(Integer) && limit.positive?)
     valid_timeout = timeout.is_a?(Numeric) && timeout.positive?
-    unless valid_root && valid_paths && valid_source && valid_options && valid_size && valid_limit && valid_timeout
+    valid_batches = batch_sizes.is_a?(Array) && batch_sizes.all? do |size|
+      size.is_a?(Integer) && size.between?(1, MATCH_BATCH)
+    end && batch_sizes.sum == paths.length
+    unless valid_root && valid_paths && valid_source && valid_options && valid_size && valid_limit && valid_timeout && valid_batches
       raise IOError, "invalid search worker configuration"
     end
 
@@ -63,6 +66,8 @@ module Alkaid::SearchWorker
         end
     when :progress
       value.length == 3 && nonnegative_integer?(value[1]) && nonnegative_integer?(value[2])
+    when :batch
+      value.length == 1
     when :error
       value.length == 2 && value[1].is_a?(String) && value[1].valid_encoding? && value[1].bytesize <= 4096
     when :done

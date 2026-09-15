@@ -194,7 +194,9 @@ module Alkaid
     end
 
     def parallel(files, count)
-      SearchPool.new(@root, @expression, @timeout, @max_file_size, @max_matches, method(:cancelled?)).run(files, count) do |message|
+      progress = ->(scanned, bytes) { update_progress(files_scanned: scanned, bytes_scanned: bytes) }
+      SearchPool.new(@root, @expression, @timeout, @max_file_size, @max_matches, method(:cancelled?)).run(files, count,
+        progress: progress) do |message|
         yield message
       end
     end

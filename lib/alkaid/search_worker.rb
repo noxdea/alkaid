@@ -17,74 +17,80 @@ module Alkaid
       raise Cancelled if callback&.call
     end
 
-    def scan(root, paths, expression, max_size, limit, cancelled: nil)
+    def scan(root, paths, expression, max_size, limit, cancelled: nil, batch_sizes: nil)
       total = 0
       files_scanned = bytes_scanned = 0
-      paths.each do |relative|
-        check_cancelled(cancelled)
-        read = read_source(root, relative, max_size, cancelled)
-        next unless read
+      cursor = 0
+      batches = batch_sizes ? batch_sizes.map { |size| paths.slice(cursor, size).tap { cursor += size } } : [paths]
+      batches.each do |batch|
+        limited = false
+        batch.each do |relative|
+          check_cancelled(cancelled)
+          read = read_source(root, relative, max_size, cancelled)
+          next unless read
 
-        source, bytes = read
-        files_scanned += 1
-        bytes_scanned += bytes
-        next unless source
+          source, bytes = read
+          files_scanned += 1
+          bytes_scanned += bytes
+          next unless source
 
-        line_scanner = StringScanner.new(source)
-        line_start = 0
-        line_end = next_line_end(line_scanner, line_start)
-        line_number = 1
-        group = nil
-        matches = []
-        each_match(source, expression, cancelled) do |match|
-          first, last = match.byteoffset(0)
-          while line_end < source.bytesize && first >= line_end
-            line_start = line_end
-            line_end = next_line_end(line_scanner, line_start)
-            line_number += 1
-          end
-          if first == source.bytesize && !source.empty? && source.end_with?("\n")
-            line_start = line_end = source.bytesize
-            line_number += 1
-          end
-
-          number = line_number
-          offset = line_start
-          target = last > first ? last - 1 : first
-          while line_end < source.bytesize && target >= line_end
-            line_start = line_end
-            line_end = next_line_end(line_scanner, line_start)
-            line_number += 1
-          end
-          current_group = [number, offset, line_end]
-          unless group == current_group
-            yield [:matches, matches] unless matches.empty?
-            matches = []
-            unless files_scanned.zero?
-              yield [:progress, files_scanned, bytes_scanned]
-              files_scanned = bytes_scanned = 0
+          line_scanner = StringScanner.new(source)
+          line_start = 0
+          line_end = next_line_end(line_scanner, line_start)
+          line_number = 1
+          group = nil
+          matches = []
+          each_match(source, expression, cancelled) do |match|
+            first, last = match.byteoffset(0)
+            while line_end < source.bytesize && first >= line_end
+              line_start = line_end
+              line_end = next_line_end(line_scanner, line_start)
+              line_number += 1
             end
-            yield [:line, relative, number, offset, source.byteslice(offset, line_end - offset)]
-            group = current_group
-          end
+            if first == source.bytesize && !source.empty? && source.end_with?("\n")
+              line_start = line_end = source.bytesize
+              line_number += 1
+            end
 
-          relative_first = first - offset
-          column = source.byteslice(offset, relative_first).length + 1
-          matches << [column, relative_first, last - offset]
-          total += 1
-          if matches.length == MATCH_BATCH || (limit && total >= limit)
-            yield [:matches, matches]
-            matches = []
+            number = line_number
+            offset = line_start
+            target = last > first ? last - 1 : first
+            while line_end < source.bytesize && target >= line_end
+              line_start = line_end
+              line_end = next_line_end(line_scanner, line_start)
+              line_number += 1
+            end
+            current_group = [number, offset, line_end]
+            unless group == current_group
+              yield [:matches, matches] unless matches.empty?
+              matches = []
+              yield [:line, relative, number, offset, source.byteslice(offset, line_end - offset)]
+              group = current_group
+            end
+
+            relative_first = first - offset
+            column = source.byteslice(offset, relative_first).length + 1
+            matches << [column, relative_first, last - offset]
+            total += 1
+            if matches.length == MATCH_BATCH || (limit && total >= limit)
+              yield [:matches, matches]
+              matches = []
+            end
+            if limit && total >= limit
+              limited = true
+              break
+            end
           end
-          return if limit && total >= limit
+          yield [:matches, matches] unless matches.empty?
+          break if limited
         end
-        yield [:matches, matches] unless matches.empty?
-        if files_scanned == MATCH_BATCH
+        unless files_scanned.zero?
           yield [:progress, files_scanned, bytes_scanned]
           files_scanned = bytes_scanned = 0
         end
+        yield [:batch] if batch_sizes
+        return if limited
       end
-      yield [:progress, files_scanned, bytes_scanned] unless files_scanned.zero?
     end
 
     def read_source(root, relative, max_size, cancelled)
@@ -120,9 +126,11 @@ module Alkaid
     def run
       STDIN.binmode
       STDOUT.binmode
-      root, paths, source, options, max_size, limit, timeout = validate_config(read_frame(STDIN))
+      root, paths, source, options, max_size, limit, timeout, batch_sizes = validate_config(read_frame(STDIN))
       expression = Regexp.new(source, options, timeout: timeout)
-      scan(root, paths, expression, max_size, limit) { |message| write_frame(STDOUT, message) }
+      scan(root, paths, expression, max_size, limit, batch_sizes: batch_sizes) do |message|
+        write_frame(STDOUT, message)
+      end
       write_frame(STDOUT, [:done])
     rescue StandardError => error
       message = "#{error.class}: #{error.message}".encode(Encoding::UTF_8, invalid: :replace, undef: :replace)

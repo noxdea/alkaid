@@ -6,7 +6,8 @@ require_relative "search_worker"
 
 module Alkaid
   class SearchPool
-    Child = Struct.new(:pid, :input, :output, :queue, :writer, :reader, :waiter)
+    BATCH_FILES = SearchWorker::MATCH_BATCH
+    Child = Struct.new(:pid, :input, :output, :queue, :lock, :ready, :writer, :reader, :waiter)
     private_constant :Child
 
     def initialize(root, expression, timeout, max_size, limit, cancelled)
@@ -18,47 +19,39 @@ module Alkaid
       @cancelled = cancelled
     end
 
-    def run(files, count)
+    def run(files, count, progress:)
       children = []
       errors = []
-      first = 0
+      batches = file_batches(files, count)
+      paths = Array.new(count) { [] }
+      batch_sizes = Array.new(count) { [] }
+      batches.each_with_index do |batch, index|
+        owner = index % count
+        paths[owner].concat(batch)
+        batch_sizes[owner] << batch.length
+      end
       count.times do |index|
         SearchWorker.check_cancelled(@cancelled)
-        length = files.length / count + (index < files.length % count ? 1 : 0)
-        children << start_child(files.slice(first, length))
-        first += length
+        children << start_child(paths[index], batch_sizes[index], progress)
       end
 
       remaining = @limit
-      children.each do |child|
-        loop do
-          SearchWorker.check_cancelled(@cancelled)
-          begin
-            message = child.queue.pop(true)
-          rescue ThreadError
-            sleep(0.005)
-            next
-          end
-          if message.is_a?(Exception)
-            errors << message
-            break
-          end
-          break if message[0] == :done
-          if message[0] == :error
-            errors << IOError.new("search worker: #{message[1]}")
-            break
-          end
-          if message[0] == :matches && remaining
-            message[1] = message[1].first(remaining)
-            remaining -= message[1].length
-          end
-          yield message
-          if remaining == 0
-            raise errors.first unless errors.empty?
+      active = Array.new(count, true)
+      batches.each_index do |index|
+        owner = index % count
+        next unless active[owner]
 
-            return
-          end
-        end
+        status, remaining = drain(children[owner], :batch, remaining, errors) { |message| yield message }
+        raise errors.first if status == :limit && !errors.empty?
+        return if status == :limit
+        active[owner] = false if status == :failed
+      end
+      children.each_with_index do |child, index|
+        next unless active[index]
+
+        status, remaining = drain(child, :done, remaining, errors) { |message| yield message }
+        raise errors.first if status == :limit && !errors.empty?
+        return if status == :limit
       end
       raise errors.first unless errors.empty?
     ensure
@@ -67,11 +60,54 @@ module Alkaid
 
     private
 
-    def start_child(files)
+    def file_batches(files, workers)
+      size = [[files.length / workers, 1].max, BATCH_FILES].min
+      files.each_slice(size).to_a
+    end
+
+    def drain(child, boundary, remaining, errors)
+      loop do
+        message = next_message(child)
+        if message.is_a?(Exception)
+          errors << message
+          return [:failed, remaining]
+        end
+        if message[0] == :error
+          errors << IOError.new("search worker: #{message[1]}")
+          return [:failed, remaining]
+        end
+        return [:complete, remaining] if message[0] == boundary
+        if [:batch, :done].include?(message[0]) || boundary == :done
+          errors << IOError.new("invalid search worker sequence")
+          return [:failed, remaining]
+        end
+        if message[0] == :matches && remaining
+          message[1] = message[1].first(remaining)
+          remaining -= message[1].length
+        end
+        yield message
+        return [:limit, remaining] if remaining == 0
+      end
+    end
+
+    def next_message(child)
+      loop do
+        SearchWorker.check_cancelled(@cancelled)
+        child.lock.synchronize do
+          begin
+            return child.queue.pop(true)
+          rescue ThreadError
+            child.ready.wait(child.lock, 0.005)
+          end
+        end
+      end
+    end
+
+    def start_child(files, batch_sizes, progress)
       child_input, input = IO.pipe
       output, child_output = IO.pipe
-      child = Child.new(nil, input, output, SizedQueue.new(2))
-      config = [@root, files, @expression.source, @expression.options, @max_size, @limit, @timeout]
+      child = Child.new(nil, input, output, SizedQueue.new(2), Mutex.new, ConditionVariable.new)
+      config = [@root, files, @expression.source, @expression.options, @max_size, @limit, @timeout, batch_sizes]
       child.pid = Process.spawn({"RUBYOPT" => nil, "RUBYLIB" => nil}, RbConfig.ruby, "--disable-gems",
         File.expand_path("search_worker/runner.rb", __dir__), in: child_input, out: child_output, err: File::NULL)
       child.waiter = Process.detach(child.pid)
@@ -88,6 +124,10 @@ module Alkaid
         loop do
           message = SearchWorker.read_frame(output)
           SearchWorker.validate_message(message)
+          if message[0] == :progress
+            progress.call(message[1], message[2])
+            next
+          end
           break unless enqueue(child, message)
           break if message[0] == :done
         end
@@ -122,6 +162,8 @@ module Alkaid
 
     def enqueue(child, message)
       child.queue.push(message)
+      child.lock.synchronize { child.ready.signal }
+      true
     rescue ClosedQueueError
       false
     end
