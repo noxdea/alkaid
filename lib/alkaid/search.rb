@@ -26,7 +26,8 @@ module Alkaid
       @extensions = extensions&.map { |extension| (extension.start_with?(".") ? extension.dup : ".#{extension}").freeze }&.freeze
       @paths = paths&.map(&:dup)&.map(&:freeze)&.freeze
       @external_cancelled = cancelled
-      @walker = Walker.new(@root, ignore: ignore, follow_symlinks: follow_symlinks, hidden: hidden, max_depth: max_depth)
+      @walker = Walker.new(@root, ignore: ignore, follow_symlinks: follow_symlinks, hidden: hidden,
+        max_depth: max_depth, cancelled: method(:cancelled?))
       @mutex = Mutex.new
       @progress = Progress.new(files_scanned: 0, bytes_scanned: 0, matches: 0)
       @cancelled = false
@@ -120,6 +121,7 @@ module Alkaid
 
         files << relative
       end
+      SearchWorker.check_cancelled(method(:cancelled?))
       files.sort!.uniq!
       files
     end
@@ -128,7 +130,7 @@ module Alkaid
       unless relative.is_a?(String) && relative.valid_encoding? && !relative.include?("\0")
         raise ArgumentError, "invalid search path"
       end
-      normalized = relative.tr("\\", "/")
+      normalized = File::ALT_SEPARATOR ? relative.tr(File::ALT_SEPARATOR, "/") : relative
       pieces = normalized.split("/", -1)
       if normalized.match?(/\A(?:\/|[A-Za-z]:\/)/) || pieces.any? { |piece| piece.empty? || piece == "." || piece == ".." }
         raise ArgumentError, "invalid search path"
@@ -154,11 +156,16 @@ module Alkaid
     def receiver(results)
       path = number = offset = raw = line = nil
       lambda do |message|
+        SearchWorker.validate_message(message)
         case message[0]
         when :line
           _, path, number, offset, raw = message
+          validate_path(path)
           line = raw.freeze
         when :matches
+          unless path && message[1].all? { |_column, first, last| last <= line.bytesize }
+            raise IOError, "invalid search worker response"
+          end
           message[1].each do |_column, first, last|
             match = Match.new(path: path.freeze, line_number: number, byte_offset: offset + first,
               line: line, ranges: [first...last].freeze)

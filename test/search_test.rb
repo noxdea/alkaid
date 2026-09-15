@@ -66,6 +66,12 @@ class SearchTest < Minitest::Test
         paths: %w[binary invalid large missing valid])
       assert_equal ["valid"], search.run.map(&:path)
       assert_equal Alkaid::Progress.new(files_scanned: 3, bytes_scanned: 23, matches: 1), search.progress
+
+      File.open(File.join(root, "hard-limit"), "wb") { |file| file.truncate(Worker::MAX_FILE_BYTES + 1) }
+      assert_empty Alkaid::Search.new(root, pattern: /./, max_file_size: nil, workers: 1,
+        paths: ["hard-limit"]).run
+      assert_equal ["valid"], Alkaid::Search.new(root, pattern: "needle", max_file_size: nil, workers: 2,
+        paths: %w[hard-limit valid]).run.map(&:path)
     end
   end
 
@@ -91,6 +97,27 @@ class SearchTest < Minitest::Test
       newline = Alkaid::Search.new(root, pattern: /\r?\n/, workers: 1).run.first
       assert_equal "日😀\r\n", newline.line
       assert_equal [7...9], newline.ranges
+      [/^/, /$/, /(?=.)/, /a|(?=b)/].each do |expression|
+        write(root, "scan", "ab\n日\n")
+        expected = "ab\n日\n".to_enum(:scan, expression).map { Regexp.last_match.byteoffset(0).first }
+        actual = Alkaid::Search.new(root, pattern: expression, workers: 1, paths: ["scan"]).run.map(&:byte_offset)
+        assert_equal expected, actual
+      end
+    end
+  end
+
+  def test_multiline_patterns_report_the_full_matching_excerpt
+    with_tree do |root|
+      write(root, "a", "zero\nfoo\nbar\nend\n")
+      write(root, "z", "none\n")
+      expected = [["a", 2, 5, "foo\nbar\n", [0...7]]]
+
+      [1, 2].each do |workers|
+        matches = Alkaid::Search.new(root, pattern: /foo\nbar/, workers: workers, paths: %w[a z]).run
+        assert_equal expected,
+          matches.map { |match| [match.path, match.line_number, match.byte_offset, match.line, match.ranges] }
+      end
+      assert_equal [17], Alkaid::Search.new(root, pattern: /\z/, workers: 1, paths: ["a"]).run.map(&:byte_offset)
     end
   end
 
@@ -136,6 +163,19 @@ class SearchTest < Minitest::Test
     end
   end
 
+  def test_external_cancellation_interrupts_directory_walking
+    with_tree do |root|
+      100.times { |index| FileUtils.mkdir(File.join(root, format("%03d", index))) }
+      calls = 0
+      stopped = false
+      cancelled = -> { calls += 1 unless stopped; stopped = calls >= 5 }
+      search = Alkaid::Search.new(root, pattern: "x", workers: 1, cancelled: cancelled)
+
+      assert_empty search.run
+      assert_equal 5, calls
+    end
+  end
+
   def test_callback_failure_still_reaps_workers
     with_tree do |root|
       %w[a b].each { |path| write(root, path, "x\n") }
@@ -172,6 +212,26 @@ class SearchTest < Minitest::Test
     end
   end
 
+  def test_worker_crash_does_not_stop_healthy_partitions
+    with_tree do |root|
+      %w[a b].each { |path| write(root, path, "x") }
+      spawn, calls, streamed, pids = Process.method(:spawn), 0, [], []
+      replacement = lambda do |*args, **options|
+        calls += 1
+        (calls == 1 ? spawn.call(*args[0...-1], "-e", "exit! 17", **options) : spawn.call(*args, **options)).tap do |pid|
+          pids << pid
+        end
+      end
+      Process.stub(:spawn, replacement) do
+        assert_raises(IOError, EOFError, Errno::EPIPE) do
+          Alkaid::Search.new(root, pattern: "x", workers: 2).run { |match| streamed << match.path }
+        end
+      end
+      assert_equal ["b"], streamed
+      pids.each { |pid| assert_raises(Errno::ECHILD) { Process.waitpid(pid, Process::WNOHANG) } }
+    end
+  end
+
   def test_timeout_and_worker_frame_validation
     with_tree do |root|
       %w[a b].each { |path| write(root, path, "a" * 20_000 + "!") }
@@ -179,6 +239,18 @@ class SearchTest < Minitest::Test
       assert_raises(Regexp::TimeoutError) { Alkaid::Search.new(root, pattern: expression, workers: 1).run }
       error = assert_raises(IOError) { Alkaid::Search.new(root, pattern: expression, workers: 2).run }
       assert_match(/Regexp::TimeoutError/, error.message)
+    end
+
+    assert_raises(ArgumentError) { Regexp.new("x", timeout: 0) }
+    assert_raises(TypeError) { Regexp.new("x", timeout: "1") }
+    seen = 0
+    Worker.each_match("xx", Regexp.new("x", timeout: 0.001), nil) { seen += 1; sleep 0.01 }
+    assert_equal 2, seen
+    unbounded = Regexp.new("x", timeout: Float::INFINITY)
+    with_tree do |root|
+      %w[a b].each { |path| write(root, path, "x") }
+      assert_equal 2, Alkaid::Search.new(root, pattern: unbounded, workers: 1).run.length
+      assert_equal 2, Alkaid::Search.new(root, pattern: unbounded, workers: 2).run.length
     end
 
     value = [:line, "日本.rb", 1, 0, "file text\n"]
@@ -193,6 +265,25 @@ class SearchTest < Minitest::Test
       assert_raises(IOError) { Worker.read_frame(StringIO.new([size].pack("N"))) }
     end
     assert_raises(IOError) { Worker.read_frame(StringIO.new([3].pack("N") + "bad")) }
+    [nil, [:line, "a", 0, -1, "x"], [:matches, [[1, 0, 2], :bad]], [:progress, -1, 0], [:error, 1], [:unknown]].each do |message|
+      assert_raises(IOError) { Worker.validate_message(message) }
+    end
+  end
+
+  def test_worker_configuration_and_match_ranges_are_validated
+    with_tree do |root|
+      valid = [root, ["a"], "x", 0, 1, nil, 0.25]
+      assert_same valid, Worker.validate_config(valid)
+      [valid[0...-1], valid.dup.tap { |entry| entry[1] = ["../outside"] },
+       valid.dup.tap { |entry| entry[4] = Worker::MAX_FILE_BYTES + 1 }].each do |config|
+        assert_raises(IOError) { Worker.validate_config(config) }
+      end
+
+      search = Alkaid::Search.new(root, pattern: "x")
+      receive = search.send(:receiver, []) {}
+      receive.call([:line, "a", 1, 0, "x"])
+      assert_raises(IOError) { receive.call([:matches, [[1, 0, 2]]]) }
+    end
   end
 
   def test_rejects_untrusted_options_and_paths

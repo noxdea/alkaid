@@ -31,7 +31,8 @@ module Alkaid
   class Walker
     include Enumerable[String]
     attr_reader root: String
-    def initialize: (String root, ?ignore: _IgnoreMatcher?, ?follow_symlinks: bool, ?hidden: bool, ?max_depth: Integer?) -> void
+    def initialize: (String root, ?ignore: _IgnoreMatcher?, ?follow_symlinks: bool, ?hidden: bool,
+      ?max_depth: Integer?, ?cancelled: ^() -> bool) -> void
     def each: () -> Enumerator[String, self]
             | () { (String) -> untyped } -> self
   end

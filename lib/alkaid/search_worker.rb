@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "strscan"
 require_relative "regexp_compat"
 require_relative "match_data_compat"
 
@@ -16,31 +17,6 @@ module Alkaid
       raise Cancelled if callback&.call
     end
 
-    def write_frame(io, value)
-      bytes = Marshal.dump(value)
-      raise IOError, "search frame exceeds safety limit" if bytes.bytesize > MAX_FRAME_BYTES
-
-      io.write([bytes.bytesize].pack("N"))
-      io.write(bytes)
-      io.flush
-    end
-
-    def read_frame(io)
-      header = io.read(4)
-      raise EOFError, "search worker ended before completion" unless header && header.bytesize == 4
-
-      size = header.unpack1("N")
-      raise IOError, "invalid search frame size" unless size.between?(1, MAX_FRAME_BYTES)
-
-      bytes = io.read(size)
-      raise EOFError, "truncated search frame" unless bytes && bytes.bytesize == size
-
-      # The peer is always this gem's own child process, never an external source.
-      Marshal.load(bytes)
-    rescue TypeError, ArgumentError => error
-      raise IOError, "invalid search frame: #{error.message}"
-    end
-
     def scan(root, paths, expression, max_size, limit, cancelled: nil)
       total = 0
       files_scanned = bytes_scanned = 0
@@ -54,35 +30,55 @@ module Alkaid
         bytes_scanned += bytes
         next unless source
 
-        offset = 0
-        source.each_line.with_index(1) do |line, number|
-          check_cancelled(cancelled)
-          matches, sent_line = [], false
-          Alkaid.with_regexp_timeout(expression) do
-            line.to_enum(:scan, expression).each do
-              match = Regexp.last_match
-              check_cancelled(cancelled)
-              unless sent_line
-                unless files_scanned.zero?
-                  yield [:progress, files_scanned, bytes_scanned]
-                  files_scanned = bytes_scanned = 0
-                end
-                yield [:line, relative, number, offset, line]
-                sent_line = true
-              end
-              first, last = match.byteoffset(0)
-              matches << [match.begin(0) + 1, first, last]
-              total += 1
-              if matches.length == MATCH_BATCH || (limit && total >= limit)
-                yield [:matches, matches]
-                matches = []
-              end
-              return if limit && total >= limit
-            end
+        line_scanner = StringScanner.new(source)
+        line_start = 0
+        line_end = next_line_end(line_scanner, line_start)
+        line_number = 1
+        group = nil
+        matches = []
+        each_match(source, expression, cancelled) do |match|
+          first, last = match.byteoffset(0)
+          while line_end < source.bytesize && first >= line_end
+            line_start = line_end
+            line_end = next_line_end(line_scanner, line_start)
+            line_number += 1
           end
-          yield [:matches, matches] unless matches.empty?
-          offset += line.bytesize
+          if first == source.bytesize && !source.empty? && source.end_with?("\n")
+            line_start = line_end = source.bytesize
+            line_number += 1
+          end
+
+          number = line_number
+          offset = line_start
+          target = last > first ? last - 1 : first
+          while line_end < source.bytesize && target >= line_end
+            line_start = line_end
+            line_end = next_line_end(line_scanner, line_start)
+            line_number += 1
+          end
+          current_group = [number, offset, line_end]
+          unless group == current_group
+            yield [:matches, matches] unless matches.empty?
+            matches = []
+            unless files_scanned.zero?
+              yield [:progress, files_scanned, bytes_scanned]
+              files_scanned = bytes_scanned = 0
+            end
+            yield [:line, relative, number, offset, source.byteslice(offset, line_end - offset)]
+            group = current_group
+          end
+
+          relative_first = first - offset
+          column = source.byteslice(offset, relative_first).length + 1
+          matches << [column, relative_first, last - offset]
+          total += 1
+          if matches.length == MATCH_BATCH || (limit && total >= limit)
+            yield [:matches, matches]
+            matches = []
+          end
+          return if limit && total >= limit
         end
+        yield [:matches, matches] unless matches.empty?
         if files_scanned == MATCH_BATCH
           yield [:progress, files_scanned, bytes_scanned]
           files_scanned = bytes_scanned = 0
@@ -101,13 +97,15 @@ module Alkaid
 
       flags = File::RDONLY
       # Windows defines NONBLOCK as 1, which aliases WRONLY in File.open.
-      flags |= File::NONBLOCK unless RUBY_PLATFORM.match?(/mswin|mingw/)
+      windows = RUBY_PLATFORM.match?(/mswin|mingw/)
+      flags |= File::NONBLOCK unless windows
+      flags |= File::NOFOLLOW if defined?(File::NOFOLLOW) && !windows
       File.open(real, flags) do |file|
         file.binmode
         return unless file.stat.file? && file.size <= max_size
 
         source = +"".b
-        while (chunk = file.read(READ_BYTES))
+        while (chunk = file.read([READ_BYTES, max_size - source.bytesize + 1].min))
           check_cancelled(cancelled)
           source << chunk
           return [nil, source.bytesize] if source.bytesize > max_size || chunk.include?("\0")
@@ -122,16 +120,38 @@ module Alkaid
     def run
       STDIN.binmode
       STDOUT.binmode
-      root, paths, source, options, max_size, limit, timeout = read_frame(STDIN)
+      root, paths, source, options, max_size, limit, timeout = validate_config(read_frame(STDIN))
       expression = Regexp.new(source, options, timeout: timeout)
       scan(root, paths, expression, max_size, limit) { |message| write_frame(STDOUT, message) }
       write_frame(STDOUT, [:done])
     rescue StandardError => error
-      write_frame(STDOUT, [:error, "#{error.class}: #{error.message}".byteslice(0, 4096)])
+      message = "#{error.class}: #{error.message}".encode(Encoding::UTF_8, invalid: :replace, undef: :replace)
+      write_frame(STDOUT, [:error, message.byteslice(0, 4093).scrub])
       write_frame(STDOUT, [:done])
+    end
+
+    def each_match(source, expression, cancelled)
+      position = 0
+      loop do
+        check_cancelled(cancelled)
+        match = Alkaid.with_regexp_timeout(expression) { expression.match(source, position) }
+        break unless match
+
+        yield match
+        ending = match.end(0)
+        break if match.begin(0) == ending && ending == source.length
+
+        position = ending + (match.begin(0) == ending ? 1 : 0)
+      end
+    end
+
+    def next_line_end(scanner, offset)
+      scanner.pos = offset
+      scanner.skip_until(/\n/) ? scanner.pos : scanner.string.bytesize
     end
   end
 end
 
+require_relative "search_worker/protocol"
 require_relative "search_worker/cancelled"
 Alkaid.send(:private_constant, :SearchWorker)

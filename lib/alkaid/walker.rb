@@ -8,10 +8,11 @@ module Alkaid
 
     attr_reader :root
 
-    def initialize(root, ignore: nil, follow_symlinks: false, hidden: false, max_depth: nil)
+    def initialize(root, ignore: nil, follow_symlinks: false, hidden: false, max_depth: nil, cancelled: nil)
       @root = File.realpath(root)
       raise ArgumentError, "root must be a directory" unless File.directory?(@root)
       raise ArgumentError, "ignore must respond to ignored?" if ignore && !ignore.respond_to?(:ignored?)
+      raise ArgumentError, "cancelled must respond to call" if cancelled && !cancelled.respond_to?(:call)
       unless [follow_symlinks, hidden].all? { |value| value == true || value == false }
         raise ArgumentError, "traversal flags must be boolean"
       end
@@ -23,6 +24,7 @@ module Alkaid
       @follow_symlinks = follow_symlinks
       @hidden = hidden
       @max_depth = max_depth
+      @cancelled = cancelled
     end
 
     def each(&block)
@@ -35,18 +37,22 @@ module Alkaid
     private
 
     def walk(directory, visited, &block)
+      return if @cancelled&.call
+
       absolute_directory = absolute(directory)
       stat = File.stat(absolute_directory)
       return unless visited.add?([stat.dev, stat.ino])
 
       Dir.children(absolute_directory).sort.each do |name|
+        return if @cancelled&.call
         next if name == ".git" || (!@hidden && name.start_with?("."))
 
         relative = directory.empty? ? name : File.join(directory, name)
-        depth = relative.count("/\\") + 1
+        normalized = File::ALT_SEPARATOR ? relative.tr(File::ALT_SEPARATOR, "/") : relative
+        depth = normalized.count("/") + 1
         next if @max_depth && depth > @max_depth
 
-        visit(relative, depth, visited, &block)
+        visit(relative, normalized, depth, visited, &block)
       rescue Errno::ENOENT, Errno::EACCES, Errno::ELOOP
         next
       end
@@ -54,7 +60,7 @@ module Alkaid
       nil
     end
 
-    def visit(relative, depth, visited, &block)
+    def visit(relative, normalized, depth, visited, &block)
       path = absolute(relative)
       entry = File.lstat(path)
       if entry.symlink?
@@ -64,7 +70,6 @@ module Alkaid
         entry = File.stat(path)
       end
 
-      normalized = relative.tr("\\", "/")
       return if @ignore&.ignored?(normalized, directory: entry.directory?)
 
       if entry.directory?

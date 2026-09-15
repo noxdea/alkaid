@@ -15,6 +15,13 @@ unless Regexp.respond_to?(:timeout)
 
     Regexp.singleton_class.prepend(Module.new do
       def new(*arguments, timeout: nil)
+        if timeout
+          raise TypeError, "timeout must be numeric" unless timeout.is_a?(Numeric)
+
+          timeout = timeout.to_f
+          timeout = nil if timeout.nan?
+          raise ArgumentError, "invalid timeout" if timeout && !timeout.positive?
+        end
         expression = super(*arguments)
         Regexp::TIMEOUTS[expression] = timeout
         expression
@@ -24,7 +31,8 @@ unless Regexp.respond_to?(:timeout)
 
   module Alkaid
     def self.with_regexp_timeout(expression)
-      expression.timeout ? Timeout.timeout(expression.timeout, Regexp::TimeoutError) { yield } : yield
+      timeout = expression.timeout
+      timeout && timeout.finite? ? Timeout.timeout(timeout, Regexp::TimeoutError) { yield } : yield
     end
   end
 else

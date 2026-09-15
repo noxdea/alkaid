@@ -45,10 +45,22 @@ class WalkerTest < Minitest::Test
   def test_rejects_invalid_options
     with_tree do |root|
       assert_raises(ArgumentError) { Alkaid::Walker.new(root, ignore: Object.new) }
+      assert_raises(ArgumentError) { Alkaid::Walker.new(root, cancelled: Object.new) }
       [-1, 1.5].each { |depth| assert_raises(ArgumentError) { Alkaid::Walker.new(root, max_depth: depth) } }
       assert_raises(ArgumentError) { Alkaid::Walker.new(root, hidden: nil) }
       write(root, "file", "x")
       assert_raises(ArgumentError) { Alkaid::Walker.new(File.join(root, "file")) }
+    end
+  end
+
+  def test_preserves_backslashes_in_posix_filenames
+    skip "backslash is a path separator" if File::ALT_SEPARATOR
+
+    with_tree do |root|
+      write(root, "back\\slash", "needle")
+      assert_equal ["back\\slash"], Alkaid::Walker.new(root, max_depth: 1).to_a
+      assert_equal ["back\\slash"],
+        Alkaid::Search.new(root, pattern: "needle", workers: 1, paths: ["back\\slash"]).run.map(&:path)
     end
   end
 end

@@ -19,6 +19,7 @@ module Alkaid
 
     def run(files, count)
       children = []
+      errors = []
       first = 0
       count.times do |index|
         SearchWorker.check_cancelled(@cancelled)
@@ -37,16 +38,28 @@ module Alkaid
             sleep(0.005)
             next
           end
-          raise message if message.is_a?(Exception)
+          if message.is_a?(Exception)
+            errors << message
+            break
+          end
           break if message[0] == :done
+          if message[0] == :error
+            errors << IOError.new("search worker: #{message[1]}")
+            break
+          end
           if message[0] == :matches && remaining
             message[1] = message[1].first(remaining)
             remaining -= message[1].length
           end
           yield message
-          return if remaining == 0
+          if remaining == 0
+            raise errors.first unless errors.empty?
+
+            return
+          end
         end
       end
+      raise errors.first unless errors.empty?
     ensure
       children&.each { |child| stop_child(child) }
     end
@@ -73,6 +86,7 @@ module Alkaid
       child.reader = Thread.new do
         loop do
           message = SearchWorker.read_frame(output)
+          SearchWorker.validate_message(message)
           break unless enqueue(child, message)
           break if message[0] == :done
         end
@@ -88,6 +102,11 @@ module Alkaid
 
     def stop_child(child)
       child.queue.close
+      [child.input, child.output].compact.each { |io| io.close unless io.closed? }
+      [child.writer, child.reader].compact.each do |thread|
+        thread.kill unless thread.join(0.2)
+        thread.join(0.1)
+      end
       if child.waiter && !child.waiter.join(0)
         signal(child, "TERM")
         unless child.waiter.join(0.2)
@@ -97,11 +116,6 @@ module Alkaid
       elsif child.pid && !child.waiter
         signal(child, "KILL")
         Process.waitpid(child.pid)
-      end
-      [child.input, child.output].compact.each { |io| io.close unless io.closed? }
-      [child.writer, child.reader].compact.each do |thread|
-        thread.kill unless thread.join(0.2)
-        thread.join(0.1)
       end
     end
 

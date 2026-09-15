@@ -29,6 +29,8 @@ end
 
 `byte_offset` is the match's zero-based offset in the file. `ranges` contains
 zero-based byte ranges in `line`, which retains its original line ending.
+For a match spanning lines, `line` contains the complete lines touched by the
+match and `line_number` identifies the first one.
 Results are ordered by relative path and byte offset even when worker processes
 are enabled.
 
