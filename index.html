@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#060a13">
+  <meta name="description" content="Alkaid is a pure Ruby file walker and parallel content search library.">
+  <title>Alkaid — File walking and parallel search for Ruby</title>
+  <link rel="stylesheet" href="site.css">
+</head>
+<body style="--accent:#70dfc3">
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <a class="brand" href="#"><span class="star-mark"></span>Alkaid</a>
+    <nav aria-label="Primary navigation">
+      <a href="#features">Capabilities</a><a href="#install">Install</a><a href="https://github.com/noxdea/alkaid">GitHub</a>
+    </nav>
+  </header>
+  <main id="main">
+    <section class="hero">
+      <div>
+        <p class="constellation">η Ursae Majoris · file search</p>
+        <h1>Find every byte.</h1>
+        <p class="lede">Deterministic file walking and parallel content search in pure Ruby—accurate across workers, multiline matches, and real-world trees.</p>
+        <div class="actions"><a class="button primary" href="#install">Install Alkaid</a><a class="button" href="https://github.com/noxdea/alkaid">View source</a></div>
+        <ul class="facts"><li><strong>Pure Ruby</strong></li><li>Ruby ≥ 3.1</li><li>MIT licensed</li></ul>
+      </div>
+      <div class="instrument" aria-label="Example parallel search results">
+        <div class="instrument-head"><span>alkaid / workspace</span><span class="signal">4 workers</span></div>
+        <div class="instrument-body">
+          <p class="command"><b>search</b> pattern: /TODO|FIXME/ · include: **/*.rb</p>
+          <div class="rows">
+            <div class="row"><span class="path"><strong>lib/alkaid/search.rb:74</strong><br><small># <mark class="hit">TODO</mark>: bounded cancellation</small></span><span class="tag">byte 1842</span></div>
+            <div class="row"><span class="path"><strong>lib/alkaid/walker.rb:109</strong><br><small># <mark class="hit">FIXME</mark>: preserve order</small></span><span class="tag">byte 2961</span></div>
+            <div class="row"><span class="path"><strong>test/search_test.rb:211</strong><br><small>assert_match <mark class="hit">TODO</mark>, result.line</small></span><span class="tag">byte 7028</span></div>
+          </div>
+          <p class="command" style="margin-top:1.25rem">3 matches · 1,284 files · deterministic order</p>
+        </div>
+      </div>
+    </section>
+    <section class="features" id="features">
+      <div class="section-heading"><h2>Search without surprises.</h2><p>Alkaid keeps traversal, matching, and concurrency independent of any editor or Git implementation. You choose the ignore policy; it returns stable, byte-accurate results.</p></div>
+      <div class="feature-grid">
+        <article><h3>Precise matches</h3><p>Literal or regular-expression search with byte offsets, ranges, whole-word matching, and multiline support.</p></article>
+        <article><h3>Stable concurrency</h3><p>Parallel workers preserve path and byte-offset order, with progress, limits, cancellation, and cleanup.</p></article>
+        <article><h3>Safe traversal</h3><p>Cycle-safe walking, include and exclude globs, hidden-file controls, and pluggable ignore rules.</p></article>
+      </div>
+    </section>
+    <section class="install" id="install">
+      <div class="install-copy"><h2>Start searching.</h2><p>Add one gem, point it at a directory, and consume matches as a stream.</p></div>
+      <div class="terminal"><div class="terminal-bar">Ruby</div><pre><span class="prompt">$</span> bundle add alkaid
+
+require "alkaid"
+
+Alkaid::Search.new(
+  Dir.pwd, pattern: "TODO", workers: 4
+).run { |match| puts match.path }</pre></div>
+    </section>
+  </main>
+  <footer><p>Alkaid · Pure Ruby · MIT</p><div><a href="https://rubygems.org/gems/alkaid">RubyGems</a><a href="https://github.com/noxdea/alkaid">GitHub</a></div></footer>
+</body>
+</html>
