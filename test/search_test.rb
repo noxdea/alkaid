@@ -203,25 +203,30 @@ class SearchTest < Minitest::Test
 
   def test_parallel_progress_is_collected_while_the_first_partition_is_busy
     with_tree do |root|
-      write(root, "000-slow", "a" * 20_000 + "!")
+      write(root, "000-slow", "b")
       1_199.times { |index| write(root, format("%04d-fast", index + 1), "b") }
-      expression = Regexp.new('^(a+)+\\1$', timeout: 1)
-      search = Alkaid::Search.new(root, pattern: expression, workers: 4)
-      failure = nil
-      thread = Thread.new do
-        search.run
-      rescue IOError => error
-        failure = error
+      search = Alkaid::Search.new(root, pattern: "x", workers: 4)
+      spawn, pids = Process.method(:spawn), []
+      replacement = lambda do |*args, **options|
+        # Hold the first worker until cancellation, independent of startup speed.
+        args = [*args[0...-1], "-e", "sleep 60"] if pids.empty?
+        spawn.call(*args, **options).tap { |pid| pids << pid }
       end
-
-      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 0.8
-      sleep(0.01) while thread.alive? && search.progress.files_scanned < 512 &&
-        Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
-      observed = search.progress.files_scanned
-      joined = thread.join(2)
-      assert_operator observed, :>=, 512
-      assert joined, "parallel search did not stop after the worker timeout"
-      assert_match(/Regexp::TimeoutError/, failure&.message)
+      Process.stub(:spawn, replacement) do
+        thread = Thread.new { search.run }
+        begin
+          deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 10
+          sleep(0.01) while thread.alive? && search.progress.files_scanned < 512 &&
+            Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
+          assert_operator search.progress.files_scanned, :>=, 512
+          assert thread.alive?, "the first worker should still be blocked"
+        ensure
+          search.cancel
+          assert thread.join(2), "parallel search did not stop after cancellation"
+        end
+        assert_empty thread.value
+      end
+      pids.each { |pid| assert_raises(Errno::ECHILD) { Process.waitpid(pid, Process::WNOHANG) } }
     end
   end
 
